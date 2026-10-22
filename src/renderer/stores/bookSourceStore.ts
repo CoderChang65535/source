@@ -119,6 +119,8 @@ interface BookSourceState {
   testMode: TestMode;
   // 测试URL/关键词
   testInput: string;
+  // 测试页码（搜索/发现分页）
+  testPage: number;
   // 测试历史
   testHistory: string[];
   // 是否正在加载
@@ -150,11 +152,12 @@ interface BookSourceState {
   clearAllSources: () => void;
   addLog: (log: Omit<DebugLog, 'id' | 'timestamp'>) => void;
   clearLogs: () => void;
-  runTest: () => Promise<void>;
-  runTestWithParams: (mode: TestMode, input: string) => Promise<void>;
+  runTest: (page?: number) => Promise<void>;
+  runTestWithParams: (mode: TestMode, input: string, page?: number) => Promise<void>;
   toggleSourceEnabled: (url: string) => void;
   setTestMode: (mode: TestMode) => void;
   setTestInput: (input: string) => void;
+  setTestPage: (page: number) => void;
   setLogFilters: (filters: LogCategory[]) => void;
   setEditorViewMode: (mode: 'text' | 'visual' | 'table') => void;
   setThemeMode: (mode: ThemeMode) => void;
@@ -229,6 +232,7 @@ export const useBookSourceStore = create<BookSourceState>()(
   logFilters: ['request', 'parse', 'field', 'error'],
   testMode: 'search',
   testInput: '',
+  testPage: 1,
   testHistory: [],
   isLoading: false,
   testResult: null,
@@ -254,6 +258,7 @@ export const useBookSourceStore = create<BookSourceState>()(
       // 切换书源时重置测试器状态
       testMode: 'search',
       testInput: '',
+      testPage: 1,
       testResult: null,
       debugLogs: [],
       chapterList: [],
@@ -436,9 +441,12 @@ export const useBookSourceStore = create<BookSourceState>()(
     set({ debugLogs: [] });
   },
 
-  runTest: async () => {
+  runTest: async (pageOverride?: number) => {
     const state = get();
     if (!state.testInput.trim()) return;
+
+    const page = Math.max(1, Math.floor(pageOverride ?? state.testPage ?? 1));
+    if (page !== state.testPage) set({ testPage: page });
 
     const activeSource = state.sources.find(
       (s) => s.bookSourceUrl === state.activeSourceId
@@ -470,7 +478,10 @@ export const useBookSourceStore = create<BookSourceState>()(
     get().addLog({
       level: 'info',
       category: 'request',
-      message: `开始${modeNames[state.testMode]}测试: ${state.testInput}`,
+      message:
+        state.testMode === 'search'
+          ? `开始${modeNames[state.testMode]}测试: ${state.testInput}（第 ${page} 页）`
+          : `开始${modeNames[state.testMode]}测试: ${state.testInput}`,
     });
 
     try {
@@ -503,7 +514,7 @@ export const useBookSourceStore = create<BookSourceState>()(
 
       switch (state.testMode) {
         case 'search':
-          result = (await window.debugApi.search(currentSource, state.testInput)) as DebugResult;
+          result = (await window.debugApi.search(currentSource, state.testInput, page)) as DebugResult;
           break;
         case 'explore':
           result = (await window.debugApi.explore(currentSource, state.testInput)) as DebugResult;
@@ -599,11 +610,11 @@ export const useBookSourceStore = create<BookSourceState>()(
   },
 
   // 使用指定参数运行测试（用于点击跳转）
-  runTestWithParams: async (mode: TestMode, input: string) => {
+  runTestWithParams: async (mode: TestMode, input: string, page?: number) => {
     // 先更新状态
-    set({ testMode: mode, testInput: input });
+    set({ testMode: mode, testInput: input, ...(page !== undefined ? { testPage: page } : {}) });
     // 然后执行测试
-    await get().runTest();
+    await get().runTest(page);
   },
 
   toggleSourceEnabled: (url: string) => {
@@ -626,6 +637,10 @@ export const useBookSourceStore = create<BookSourceState>()(
 
   setTestInput: (input: string) => {
     set({ testInput: input });
+  },
+
+  setTestPage: (page: number) => {
+    set({ testPage: Math.max(1, Math.floor(page || 1)) });
   },
 
   setLogFilters: (filters: LogCategory[]) => {
@@ -718,7 +733,7 @@ export const useBookSourceStore = create<BookSourceState>()(
 declare global {
   interface Window {
     debugApi?: {
-      search: (source: AnySource, keyword: string) => Promise<unknown>;
+      search: (source: AnySource, keyword: string, page?: number) => Promise<unknown>;
       explore: (source: AnySource, exploreUrl: string) => Promise<unknown>;
       parseExploreCategories: (source: AnySource) => Promise<{
         success: boolean;

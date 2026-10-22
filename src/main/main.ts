@@ -145,7 +145,7 @@ ipcMain.on('ipc-example', async (event, arg) => {
  */
 ipcMain.handle(
   'debug:search',
-  async (_event, source: any, keyword: string) => {
+  async (_event, source: any, keyword: string, page?: number) => {
     try {
       if (isYiciyuanSource(source)) {
         const debugger_ = new YiciyuanDebugger(source);
@@ -153,7 +153,7 @@ ipcMain.handle(
         return result;
       } else {
         const debugger_ = new SourceDebugger(source as BookSource);
-        const result = await debugger_.debugSearch(keyword);
+        const result = await debugger_.debugSearch(keyword, page || 1);
         return result;
       }
     } catch (error: any) {

@@ -549,7 +549,7 @@ export class SourceDebugger {
   /**
    * 执行搜索测试 - 完全兼容 Legado
    */
-  async debugSearch(keyword: string): Promise<DebugResult> {
+  async debugSearch(keyword: string, page: number = 1): Promise<DebugResult> {
     this.logs = [];
 
     try {
@@ -557,7 +557,7 @@ export class SourceDebugger {
       await this.initSource();
 
       // 1. 使用 AnalyzeUrl 构建搜索URL (兼容 Legado 的 <js>, @js:, {{}} 等语法)
-      const analyzeUrl = this.buildSearchUrlAnalyze(keyword);
+      const analyzeUrl = this.buildSearchUrlAnalyze(keyword, page);
       if (!analyzeUrl) {
         this.log('error', 'error', '搜索URL为空');
         return { success: false, logs: this.logs, error: '搜索URL为空' };
@@ -568,7 +568,7 @@ export class SourceDebugger {
       const headers = { ...this.getHeaders(), ...analyzeUrl.getHeaders() };
       const body = analyzeUrl.getBody();
 
-      this.log('info', 'request', `构建搜索URL: ${searchUrl}`);
+      this.log('info', 'request', `构建搜索URL（第 ${page} 页）: ${searchUrl}`);
 
       let responseBody = '';
       let requestResult: RequestResult | undefined;
@@ -1648,17 +1648,22 @@ export class SourceDebugger {
       }
 
       // 解析下一页链接（如果有）
+      // 注意：末页规则可能返回空数组/空字符串（例如 ##regex 把下一章链接替换为空），
+      // 这时应当安静地停止，不要打出 "下一页链接: undefined"
       let nextContentUrl = '';
       if (ruleContent.nextContentUrl) {
         const nextResult = parseRule(ctx, ruleContent.nextContentUrl);
-        if (nextResult.success && nextResult.data) {
-          nextContentUrl = Array.isArray(nextResult.data)
-            ? nextResult.data[0]
-            : nextResult.data;
-          if (nextContentUrl && !nextContentUrl.startsWith('http')) {
+        const rawNext = Array.isArray(nextResult.data)
+          ? nextResult.data[0]
+          : nextResult.data;
+        nextContentUrl = rawNext ? String(rawNext).trim() : '';
+        if (nextContentUrl) {
+          if (!nextContentUrl.startsWith('http')) {
             nextContentUrl = resolveUrl(nextContentUrl, this.getBaseUrl());
           }
           this.log('info', 'field', `下一页链接: ${nextContentUrl}`);
+        } else {
+          this.log('info', 'field', '下一页链接: 无（本章最后一页）');
         }
       }
 

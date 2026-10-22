@@ -20,6 +20,7 @@ import {
   Tooltip,
   Modal,
   Select,
+  NumberInput,
   useMantineColorScheme,
 } from '@mantine/core';
 import {
@@ -74,6 +75,8 @@ export function DebugPanel() {
     setTestMode,
     testInput,
     setTestInput,
+    testPage,
+    setTestPage,
     testHistory,
     isLoading,
     testResult,
@@ -435,6 +438,23 @@ export function DebugPanel() {
     await runTest();
   };
 
+  // 搜索分页：站点每页固定 10 条，翻页参数为 p
+  const searchTotal = useMemo(() => {
+    if (testMode !== 'search' || !testResult?.rawResponse) return 0;
+    const m = String(testResult.rawResponse).match(
+      /找到共[\s\S]{0,40}?(\d+)[\s\S]{0,10}?条结果/
+    );
+    return m ? Number(m[1]) : 0;
+  }, [testMode, testResult]);
+
+  const totalPages = searchTotal > 0 ? Math.ceil(searchTotal / 10) : 0;
+
+  const goPage = (page: number) => {
+    const next = Math.max(1, page);
+    setTestPage(next);
+    void runTest(next);
+  };
+
   // 上一章/下一章
   const hasPrevChapter = currentChapterIndex > 0;
   const hasNextChapter = currentChapterIndex >= 0 && currentChapterIndex < chapterList.length - 1;
@@ -572,6 +592,19 @@ export function DebugPanel() {
                   }
                 />
               )}
+              {testMode === 'search' && (
+                <NumberInput
+                  value={testPage}
+                  onChange={(value) => setTestPage(Number(value) || 1)}
+                  min={1}
+                  size="sm"
+                  w={76}
+                  placeholder="页码"
+                  hideControls
+                  aria-label="页码"
+                  onKeyDown={(e) => e.key === 'Enter' && handleTest()}
+                />
+              )}
               <Button
                 onClick={handleTest}
                 loading={isLoading}
@@ -580,6 +613,38 @@ export function DebugPanel() {
                 {isLoading ? '停止' : '测试'}
               </Button>
             </Group>
+
+            {/* 搜索分页控制 */}
+            {testMode === 'search' && (
+              <Group gap="xs" align="center">
+                <ActionIcon
+                  variant="light"
+                  size="sm"
+                  aria-label="上一页"
+                  disabled={testPage <= 1 || isLoading}
+                  onClick={() => goPage(testPage - 1)}
+                >
+                  <IconChevronLeft size={16} />
+                </ActionIcon>
+                <Text size="xs" c="dimmed">
+                  第 {testPage}
+                  {totalPages > 0 ? ` / ${totalPages}` : ''} 页
+                  {searchTotal > 0 ? ` · 共 ${searchTotal} 条` : ''}
+                </Text>
+                <ActionIcon
+                  variant="light"
+                  size="sm"
+                  aria-label="下一页"
+                  disabled={isLoading || (totalPages > 0 && testPage >= totalPages)}
+                  onClick={() => goPage(testPage + 1)}
+                >
+                  <IconChevronRight size={16} />
+                </ActionIcon>
+                <Text size="xs" c="dimmed">
+                  （站点每页 10 本，URL 参数 p）
+                </Text>
+              </Group>
+            )}
 
             {/* 发现模式下显示分类数量提示 */}
             {testMode === 'explore' && (isLoadingCategories || exploreCategoryCount > 0) && (

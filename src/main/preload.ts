@@ -37,8 +37,8 @@ const debugApiHandler = {
   /**
    * 搜索测试
    */
-  search: (source: any, keyword: string) => {
-    return ipcRenderer.invoke('debug:search', source, keyword);
+  search: (source: any, keyword: string, page?: number) => {
+    return ipcRenderer.invoke('debug:search', source, keyword, page);
   },
 
   /**

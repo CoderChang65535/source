@@ -8,7 +8,7 @@ import { decode } from 'html-entities';
 import * as vm from 'vm';
 import * as crypto from 'crypto';
 import * as xpath from 'xpath';
-import { DOMParser } from '@xmldom/xmldom';
+import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
@@ -818,16 +818,9 @@ function parseCss(html: string, rule: string, baseUrl: string): any[] {
       value = $(el).attr(attr) || '';
     }
 
-    // 应用正则替换
+    // 应用正则替换（Legado 语义：默认替换为空字符串，而不是提取匹配内容）
     if (regex && value) {
-      if (replaceStr !== undefined && replaceStr !== '') {
-        value = value.replace(regex, replaceStr);
-      } else {
-        const match = value.match(regex);
-        if (match) {
-          value = match[1] || match[0];
-        }
-      }
+      value = value.replace(regex, replaceStr);
     }
 
     if (value) {
@@ -893,6 +886,103 @@ function parseRegex(text: string, rule: string): any[] {
   }
 }
 
+// HTML 空元素（在 XML 中必须自闭合）
+const XML_VOID_ELEMENTS =
+  'area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr';
+
+// HTML -> XML 文档缓存（同一份 HTML 往往被多个字段规则重复解析）
+const xmlDocCache = new Map<string, Document>();
+const XML_DOC_CACHE_MAX = 16;
+
+/**
+ * 把真实世界的 HTML 规范化为 XML 文档，供 xpath 库使用。
+ * xmldom 只能解析 XML；直接喂 HTML（未闭合的 meta/img/li、&nbsp; 实体、
+ * script 中的裸 < 和 &）会得到结构损坏甚至空的文档，导致 XPath 全部匹配失败。
+ */
+function htmlToXmlDocument(html: string): Document | null {
+  try {
+    const cacheKey = crypto.createHash('sha1').update(html).digest('hex');
+    const cached = xmlDocCache.get(cacheKey);
+    if (cached) return cached;
+
+    const $ = cheerio.load(html, { decodeEntities: true });
+    // 脚本/样式内容通常含裸 <、&，且不是规则目标，移除可显著提高 XML 合法性
+    $('script, style, noscript').remove();
+    let xml = $.html();
+    xml = xml.replace(/<!DOCTYPE[^>]*>/gi, '');
+    // 空元素自闭合，例如 <meta charset="utf-8"> -> <meta charset="utf-8"/>
+    xml = xml.replace(
+      new RegExp(`<(${XML_VOID_ELEMENTS})((?:\\s[^<>]*?)?)\\s*>`, 'gi'),
+      '<$1$2/>'
+    );
+    // 剩余的不合法 & 实体（XML 只允许 &amp; &lt; &gt; &quot; &apos; 和数字实体）
+    xml = xml.replace(
+      /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g,
+      '&amp;'
+    );
+
+    const parser = new DOMParser({
+      errorHandler: {
+        warning: () => {},
+        error: () => {},
+        fatalError: () => {},
+      },
+    });
+    const doc = parser.parseFromString(xml, 'text/xml') as unknown as Document;
+    if (!doc || !doc.documentElement) return null;
+
+    if (xmlDocCache.size >= XML_DOC_CACHE_MAX) {
+      const firstKey = xmlDocCache.keys().next().value;
+      if (firstKey) xmlDocCache.delete(firstKey);
+    }
+    xmlDocCache.set(cacheKey, doc);
+    return doc;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 用 XPath 选择元素，并包装为 Cheerio 元素（供 parseList 使用）。
+ * parseList 以前只支持 JSONPath/CSS，导致 XPath 写法的书源列表规则永远匹配 0 条。
+ */
+function xpathSelectElements(html: string, expr: string): cheerio.Cheerio<any>[] {
+  const doc = htmlToXmlDocument(html);
+  if (!doc) return [];
+
+  let nodes: unknown;
+  try {
+    nodes = xpath.select(expr, doc as any);
+  } catch {
+    return [];
+  }
+
+  const list = Array.isArray(nodes) ? nodes : [nodes];
+  const serializer = new XMLSerializer();
+  const out: cheerio.Cheerio<any>[] = [];
+
+  for (const node of list as any[]) {
+    if (!node) continue;
+    try {
+      if (node.nodeType === 1) {
+        const htmlStr = serializer.serializeToString(node);
+        const $frag = cheerio.load(htmlStr, null, false);
+        const $el = $frag.root().children().first();
+        if ($el.length) out.push($el);
+      } else if (node.nodeType === 2 || node.nodeType === 3) {
+        const value = node.nodeValue || '';
+        const $frag = cheerio.load(`<span>${value}</span>`, null, false);
+        const $el = $frag.root().children().first();
+        if ($el.length) out.push($el);
+      }
+    } catch {
+      // 忽略单个节点的序列化错误
+    }
+  }
+
+  return out;
+}
+
 /**
  * XPath 解析 - 使用真正的 xpath 库
  * 完整支持 XPath 1.0 语法
@@ -905,37 +995,9 @@ function parseXPath(html: string, rule: string, baseUrl: string): any[] {
       xpathExpr = xpathExpr.substring(7);
     }
 
-    // 预处理 HTML，修复常见问题
-    let processedHtml = html
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&');
-
-    // 使用 xmldom 解析 HTML
-    const parser = new DOMParser({
-      errorHandler: {
-        warning: () => {},
-        error: () => {},
-        fatalError: () => {},
-      },
-    });
-
-    // 尝试作为 HTML 解析
-    let doc: Document;
-    try {
-      doc = parser.parseFromString(processedHtml, 'text/html');
-    } catch {
-      // 如果 HTML 解析失败，尝试作为 XML
-      try {
-        doc = parser.parseFromString(processedHtml, 'text/xml');
-      } catch {
-        // 回退到 cheerio 方式
-        return parseXPathFallback(html, xpathExpr, baseUrl);
-      }
-    }
-
-    if (!doc || !doc.documentElement) {
+    // 先把 HTML 规范化为 XML 文档（xmldom 不能直接解析 HTML）
+    const doc = htmlToXmlDocument(html);
+    if (!doc) {
       return parseXPathFallback(html, xpathExpr, baseUrl);
     }
 
@@ -2640,12 +2702,15 @@ export function splitRule(rule: string): {
   let jsSuffix: string | undefined;
   
   // 查找 @js: 的位置
+  // 注意：@js: 之后的整段代码都是 JS，不能参与 || / && / %% 的规则切分，
+  // 否则 JS 里的 ||（如 map[k]||'□'）会被当成分隔符，JS 被截断后执行失败。
+  // Legado 语义：先执行 @js: 前面的规则，再把结果作为 result 传给 JS。
   const jsIndex = rule.indexOf('@js:');
   if (jsIndex > 0) {
-    const beforeJs = rule.substring(0, jsIndex);
-    // 检查 @js: 前面是否有 || 或 && 或 %%
-    if (beforeJs.includes('||') || beforeJs.includes('&&') || beforeJs.includes('%%')) {
-      mainRule = beforeJs;
+    const jsCode = rule.substring(jsIndex + 4).trimStart();
+    // @js: 后面以 # 开头的是 ##regex##replacement 正则替换写法，不是 JS 代码，保持原样
+    if (!jsCode.startsWith('#') && rule.substring(0, jsIndex).trim()) {
+      mainRule = rule.substring(0, jsIndex);
       jsSuffix = rule.substring(jsIndex);
     }
   }
@@ -2829,16 +2894,32 @@ function executeSingleRule(
     return results;
   }
 
-  // 5. XPath 规则
-  if (
-    rule.toLowerCase().startsWith('@xpath:') ||
-    (rule.startsWith('//') && !rule.startsWith('//'))
-  ) {
-    return parseXPath(text, rule, baseUrl);
-  }
-  // 以 // 开头的 XPath
-  if (rule.startsWith('//')) {
-    return parseXPath(text, rule, baseUrl);
+  // 5. XPath 规则（支持 Legado 的 ##正则##替换 后缀）
+  const isXPathRule =
+    rule.toLowerCase().startsWith('@xpath:') || rule.startsWith('//');
+  if (isXPathRule) {
+    let xpathRule = rule;
+    let replaceRegex = '';
+    let replacement = '';
+    // Legado 语法: rule##正则##替换（或 rule##正则##替换### 只替换第一个）
+    // 至少需要两个 ## 分隔符才当作替换规则，避免误伤表达式里的字面量
+    const xpathParts = rule.split('##');
+    if (xpathParts.length >= 3) {
+      xpathRule = xpathParts[0].trim();
+      replaceRegex = xpathParts[1] || '';
+      replacement = xpathParts[2] || '';
+    }
+    const results = parseXPath(text, xpathRule, baseUrl);
+    if (!replaceRegex) return results;
+    try {
+      const regex = new RegExp(replaceRegex, 'g');
+      return results.map((r) => {
+        if (typeof r === 'string') return r.replace(regex, replacement);
+        return r;
+      });
+    } catch {
+      return results;
+    }
   }
 
   // 6. 正则规则
@@ -3020,6 +3101,21 @@ export function parseList(
       }
       results = parseJson(ctx.body, jsonRule);
       results = Array.isArray(results) ? results : [results];
+      return shouldReverse ? results.reverse() : results;
+    }
+
+    // XPath 列表，例如: //div[@class='list']/ul 或 @xpath://ul/li
+    const xpathExpr = actualRule
+      .replace(/^@xpath:/i, '')
+      .replace(/^xpath:/i, '');
+    if (
+      actualRule.toLowerCase().startsWith('@xpath:') ||
+      /^xpath:/i.test(actualRule) ||
+      /^\(\s*\//.test(actualRule) ||
+      /^\/\//.test(actualRule) ||
+      /^\/html/i.test(actualRule)
+    ) {
+      results = xpathSelectElements(ctx.body, xpathExpr);
       return shouldReverse ? results.reverse() : results;
     }
 
